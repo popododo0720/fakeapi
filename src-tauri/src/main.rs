@@ -18,7 +18,10 @@ use endpoints::{
     clear_tls_config,
     get_network_interfaces,
     generate_temp_certificate,
-    cleanup_temp_certificates
+    cleanup_temp_certificates,
+    save_project,
+    load_project,
+    set_project_state
 };
 
 fn main() {
@@ -37,7 +40,10 @@ fn main() {
             clear_tls_config,
             get_network_interfaces,
             generate_temp_certificate,
-            cleanup_temp_certificates
+            cleanup_temp_certificates,
+            save_project,
+            load_project,
+            set_project_state
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {

@@ -9,7 +9,18 @@ interface ServerStatus {
   is_tls?: boolean;
 }
 
-interface TlsConfig {
+export interface ServerSettings {
+  port: number;
+  bindAddr: string;
+  enableTls: boolean;
+}
+
+export interface TlsConfig {
+  certPath: string;
+  keyPath: string;
+}
+
+interface TlsConfigRust {
   cert_path: string;
   key_path: string;
 }
@@ -19,47 +30,23 @@ interface NetworkInterface {
   ip: string;
 }
 
-export function Sidebar() {
-  const [port, setPort] = useState<number>(3000);
-  const [serverStatus, setServerStatus] = useState<ServerStatus>({ running: false });
-  const [enableTls, setEnableTls] = useState<boolean>(false);
+interface SidebarProps {
+  settings: ServerSettings;
+  onSettingsChange: (settings: ServerSettings) => void;
+  tlsConfig: TlsConfig | null;
+  onTlsConfigChange: (config: TlsConfig | null) => void;
+  isServerRunning: boolean;
+  onServerStateChange: (isRunning: boolean) => void;
+  onServerStart: () => Promise<void>;
+}
+
+export function Sidebar({ settings, onSettingsChange, tlsConfig, onTlsConfigChange, isServerRunning, onServerStateChange, onServerStart }: SidebarProps) {
   const [showTlsConfig, setShowTlsConfig] = useState<boolean>(false);
-  const [certPath, setCertPath] = useState<string>("");
-  const [keyPath, setKeyPath] = useState<string>("");
-  const [tlsConfigured, setTlsConfigured] = useState<boolean>(false);
   const [networkInterfaces, setNetworkInterfaces] = useState<NetworkInterface[]>([]);
-  const [selectedInterface, setSelectedInterface] = useState<string>("127.0.0.1");
 
   useEffect(() => {
-    checkServerStatus();
-    loadTlsConfig();
     loadNetworkInterfaces();
   }, []);
-
-  async function checkServerStatus() {
-    try {
-      const status = await invoke<ServerStatus>("get_server_status");
-      setServerStatus(status);
-      if (status.port) {
-        setPort(status.port);
-      }
-    } catch (error) {
-      console.error("Failed to get server status:", error);
-    }
-  }
-
-  async function loadTlsConfig() {
-    try {
-      const config = await invoke<TlsConfig | null>("get_tls_config");
-      if (config) {
-        setCertPath(config.cert_path);
-        setKeyPath(config.key_path);
-        setTlsConfigured(true);
-      }
-    } catch (error) {
-      console.error("Failed to load TLS config:", error);
-    }
-  }
 
   async function loadNetworkInterfaces() {
     try {
@@ -80,7 +67,10 @@ export function Sidebar() {
         }]
       });
       if (selected) {
-        setCertPath(selected);
+        onTlsConfigChange({
+          ...tlsConfig,
+          certPath: selected,
+        } as TlsConfig);
       }
     } catch (error) {
       console.error("Failed to open file dialog:", error);
@@ -97,7 +87,10 @@ export function Sidebar() {
         }]
       });
       if (selected) {
-        setKeyPath(selected);
+        onTlsConfigChange({
+          ...tlsConfig,
+          keyPath: selected,
+        } as TlsConfig);
       }
     } catch (error) {
       console.error("Failed to open file dialog:", error);
@@ -106,8 +99,9 @@ export function Sidebar() {
 
   async function handleSaveTlsConfig() {
     try {
-      await invoke("set_tls_config", { certPath, keyPath });
-      setTlsConfigured(true);
+      if (!tlsConfig) return;
+      await invoke("set_tls_config", { certPath: tlsConfig.certPath, keyPath: tlsConfig.keyPath });
+      // onTlsConfigChange is already handling the state
       setShowTlsConfig(false);
       alert("TLS configuration saved successfully!");
     } catch (error) {
@@ -120,11 +114,9 @@ export function Sidebar() {
     try {
       await invoke("clear_tls_config");
       await invoke("cleanup_temp_certificates");
-      setCertPath("");
-      setKeyPath("");
-      setTlsConfigured(false);
-      setEnableTls(false);
-      alert("TLS configuration cleared");
+      onTlsConfigChange(null);
+      onSettingsChange({ ...settings, enableTls: false });
+      console.log("TLS configuration cleared");
     } catch (error) {
       console.error("Failed to clear TLS config:", error);
     }
@@ -132,12 +124,18 @@ export function Sidebar() {
 
   async function handleGenerateTempCert() {
     try {
-      const config = await invoke<TlsConfig>("generate_temp_certificate");
-      setCertPath(config.cert_path);
-      setKeyPath(config.key_path);
-      setTlsConfigured(true);
+      const config = await invoke<TlsConfigRust>("generate_temp_certificate");
+      const tlsConfig = { certPath: config.cert_path, keyPath: config.key_path };
+      onTlsConfigChange(tlsConfig);
+      // 백엔드에도 TLS 구성 정보 저장
+      await invoke("set_tls_config", { 
+        params: { 
+          certPath: tlsConfig.certPath, 
+          keyPath: tlsConfig.keyPath 
+        } 
+      });
       setShowTlsConfig(false);
-      alert("Temporary certificate generated successfully!");
+      console.log("Temporary certificate generated successfully!");
     } catch (error) {
       console.error("Failed to generate temp certificate:", error);
       alert(`Failed to generate certificate: ${error}`);
@@ -146,76 +144,98 @@ export function Sidebar() {
 
   async function handleStartServer() {
     try {
-      const message = await invoke<string>("start_server", {
-        port,
-        bindAddr: selectedInterface,
-        enableTls
+      // 먼저 onServerStart 호출로 기존 정보를 전송
+      await onServerStart();
+      
+      // TLS 설정이 활성화되었고, 현재 tlsConfig가 있다면 이를 백엔드에 다시 동기화
+      // 이는 handleGenerateTempCert에서 등록한 TLS 정보가 서버 시작 전에 백엔드에 반영되도록 함
+      if (settings.enableTls && tlsConfig) {
+        await invoke("set_tls_config", { 
+          params: { 
+            certPath: tlsConfig.certPath, 
+            keyPath: tlsConfig.keyPath 
+          } 
+        });
+      }
+
+      // 먼저 실행 중인 서버가 있으면 종료
+      const status = await invoke<ServerStatus>("get_server_status");
+      if (status.running) {
+        await invoke("stop_server");
+        // 서버가 완전히 종료될 때까지 대기
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      // 새 서버 시작
+      await invoke<string>("start_server", {
+        params: {
+          port: settings.port,
+          bindAddr: settings.bindAddr,
+          enableTls: settings.enableTls
+        }
       });
-      await checkServerStatus();
-      alert(message);
+      onServerStateChange(true);
     } catch (error) {
       console.error("Failed to start server:", error);
       alert(`Failed to start server: ${error}`);
+      onServerStateChange(false);
     }
   }
 
   async function handleStopServer() {
     try {
       await invoke("stop_server");
-      await checkServerStatus();
+      onServerStateChange(false);
     } catch (error) {
       console.error("Failed to stop server:", error);
       alert(`Failed to stop server: ${error}`);
     }
   }
 
-  const protocol = serverStatus.is_tls ? "https" : "http";
+  const protocol = settings.enableTls ? "https" : "http";
 
   return (
     <div className="sidebar">
-      <div className="sidebar-header">
-        <h2>AKA</h2>
-      </div>
-
       <div className="sidebar-section">
         <h3>Server Settings</h3>
 
         <div className="status-indicator">
-          <div className={`status-dot ${serverStatus.running ? 'running' : 'stopped'}`}></div>
-          <span>{serverStatus.running ? 'Running' : 'Stopped'}</span>
+          <div className={`status-dot ${isServerRunning ? 'running' : 'stopped'}`}></div>
+          <span>{isServerRunning ? 'Running' : 'Stopped'}</span>
         </div>
 
-        {serverStatus.running && (
+        {isServerRunning && (
           <div className="server-info">
+            <p>Server is running at:</p>
             <p className="url">
-              {protocol}://{selectedInterface}:{serverStatus.port}
+              {protocol}://{settings.bindAddr}:{settings.port}
             </p>
           </div>
         )}
 
         <div className="port-input">
-          <label>Bind Address:</label>
+          <label>Bind Address</label>
           <select
-            value={selectedInterface}
-            onChange={(e) => setSelectedInterface(e.target.value)}
-            disabled={serverStatus.running}
+            value={settings.bindAddr}
+            onChange={(e) => onSettingsChange({ ...settings, bindAddr: e.target.value })}
+            disabled={isServerRunning}
           >
             {networkInterfaces.map((iface) => (
               <option key={iface.ip} value={iface.ip}>
-                {iface.name}
+                {iface.name} ({iface.ip})
               </option>
             ))}
           </select>
         </div>
 
         <div className="port-input">
-          <label>Port:</label>
+          <label>Port</label>
           <input
             type="number"
-            value={port}
-            onChange={(e) => setPort(Number(e.target.value))}
-            disabled={serverStatus.running}
-            min={1024}
+            value={settings.port}
+            onChange={(e) => onSettingsChange({ ...settings, port: Number(e.target.value) })}
+            disabled={isServerRunning}
+            min={1}
             max={65535}
           />
         </div>
@@ -224,36 +244,36 @@ export function Sidebar() {
           <label className="checkbox-label">
             <input
               type="checkbox"
-              checked={enableTls}
+              checked={settings.enableTls}
               onChange={(e) => {
                 const checked = e.target.checked;
-                setEnableTls(checked);
+                onSettingsChange({ ...settings, enableTls: checked });
                 if (!checked) {
                   setShowTlsConfig(false);
                 }
               }}
-              disabled={serverStatus.running}
+              disabled={isServerRunning}
             />
             <span>Enable TLS/HTTPS</span>
           </label>
         </div>
 
-        {enableTls && (
+        {settings.enableTls && (
           <div className="tls-config-section">
-            {tlsConfigured ? (
+            {tlsConfig ? (
               <div className="tls-configured">
                 <p className="config-status">✓ TLS certificates configured</p>
                 <button
                   className="btn-secondary"
                   onClick={() => setShowTlsConfig(!showTlsConfig)}
-                  disabled={serverStatus.running}
+                  disabled={isServerRunning}
                 >
                   {showTlsConfig ? "Hide Config" : "Edit Config"}
                 </button>
                 <button
                   className="btn-secondary btn-danger-outline"
                   onClick={handleClearTlsConfig}
-                  disabled={serverStatus.running}
+                  disabled={isServerRunning}
                 >
                   Clear
                 </button>
@@ -263,12 +283,14 @@ export function Sidebar() {
                 <button
                   className="btn-secondary"
                   onClick={() => setShowTlsConfig(!showTlsConfig)}
+                  disabled={isServerRunning}
                 >
                   {showTlsConfig ? "Hide Config" : "Configure TLS"}
                 </button>
                 <button
                   className="btn-secondary btn-temp-cert"
                   onClick={handleGenerateTempCert}
+                  disabled={isServerRunning}
                 >
                   Use Temp Certificate
                 </button>
@@ -281,38 +303,38 @@ export function Sidebar() {
           <div className="tls-config-modal">
             <h4>TLS Configuration</h4>
             <div className="form-group">
-              <label>Certificate File (.pem/.crt):</label>
+              <label>Certificate File (.pem/.crt)</label>
               <div className="file-input-group">
                 <input
                   type="text"
                   placeholder="C:\certs\cert.pem"
-                  value={certPath}
-                  onChange={(e) => setCertPath(e.target.value)}
+                  value={tlsConfig?.certPath || ""}
+                  onChange={(e) => onTlsConfigChange({ ...tlsConfig, certPath: e.target.value } as TlsConfig)}
                 />
                 <button
                   className="btn-browse"
                   onClick={handleBrowseCertFile}
                   type="button"
                 >
-                  Browse...
+                  Browse
                 </button>
               </div>
             </div>
             <div className="form-group">
-              <label>Private Key File (.key):</label>
+              <label>Private Key File (.key)</label>
               <div className="file-input-group">
                 <input
                   type="text"
                   placeholder="C:\certs\key.pem"
-                  value={keyPath}
-                  onChange={(e) => setKeyPath(e.target.value)}
+                  value={tlsConfig?.keyPath || ""}
+                  onChange={(e) => onTlsConfigChange({ ...tlsConfig, keyPath: e.target.value } as TlsConfig)}
                 />
                 <button
                   className="btn-browse"
                   onClick={handleBrowseKeyFile}
                   type="button"
                 >
-                  Browse...
+                  Browse
                 </button>
               </div>
             </div>
@@ -331,28 +353,21 @@ export function Sidebar() {
         )}
 
         <div className="server-controls">
-          {!serverStatus.running ? (
-            <button
-              className="btn-start"
-              onClick={handleStartServer}
-              disabled={enableTls && !tlsConfigured}
-            >
-              Start Server
-            </button>
-          ) : (
-            <button className="btn-stop" onClick={handleStopServer}>
-              Stop Server
-            </button>
-          )}
+          <button
+            className="btn-start"
+            onClick={handleStartServer}
+            disabled={isServerRunning}
+          >
+            Start Server
+          </button>
+          <button
+            className="btn-stop"
+            onClick={handleStopServer}
+            disabled={!isServerRunning}
+          >
+            Stop Server
+          </button>
         </div>
-      </div>
-
-      <div className="sidebar-section">
-        <h3>Navigation</h3>
-        <nav className="sidebar-nav">
-          <a href="#endpoints" className="active">Endpoints</a>
-          <a href="#settings">Settings</a>
-        </nav>
       </div>
     </div>
   );

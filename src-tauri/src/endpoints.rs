@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use std::fs;
+use tauri_plugin_dialog::DialogExt;
 use rcgen::generate_simple_self_signed;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,6 +10,8 @@ pub struct Endpoint {
     pub id: String,
     pub method: String,
     pub path: String,
+    pub status: u16,
+    pub delay: u64,
     pub response: String,
 }
 
@@ -17,11 +21,30 @@ pub struct TlsConfig {
     pub key_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerSettings {
+    pub port: u16,
+    pub bind_addr: String,
+    pub enable_tls: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectData {
+    pub name: String,
+    #[serde(rename = "lastSaved")]
+    pub last_saved: String,
+    pub endpoints: Vec<Endpoint>,
+    pub settings: ServerSettings,
+    #[serde(rename = "tlsConfig")]
+    pub tls_config: Option<TlsConfig>,
+}
+
 pub struct AppState {
     pub endpoints: Arc<RwLock<Vec<Endpoint>>>,
     pub server_handle: Arc<RwLock<Option<crate::server::ServerHandle>>>,
     pub tls_config: Arc<RwLock<Option<TlsConfig>>>,
     pub temp_cert_paths: Arc<RwLock<Option<(String, String)>>>,
+    pub server_settings: Arc<RwLock<ServerSettings>>, // Add this line
 }
 
 impl AppState {
@@ -31,6 +54,11 @@ impl AppState {
             server_handle: Arc::new(RwLock::new(None)),
             tls_config: Arc::new(RwLock::new(None)),
             temp_cert_paths: Arc::new(RwLock::new(None)),
+            server_settings: Arc::new(RwLock::new(ServerSettings { // Initialize with default settings
+                port: 3000,
+                bind_addr: "127.0.0.1".to_string(),
+                enable_tls: false,
+            })),
         }
     }
 }
@@ -41,11 +69,15 @@ pub async fn add_endpoint(
     method: String,
     path: String,
     response: String,
+    status: u16,
+    delay: u64,
 ) -> Result<Endpoint, String> {
     let endpoint = Endpoint {
         id: uuid::Uuid::new_v4().to_string(),
         method,
         path,
+        status,
+        delay,
         response,
     };
 
@@ -65,28 +97,41 @@ pub async fn delete_endpoint(state: tauri::State<'_, AppState>, id: String) -> R
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartServerParams {
+    port: u16,
+    bind_addr: String,
+    enable_tls: bool,
+}
+
 #[tauri::command]
 pub async fn start_server(
     state: tauri::State<'_, AppState>,
-    port: u16,
-    bind_addr: String,
-    enable_tls: bool
+    params: StartServerParams,
 ) -> Result<String, String> {
     let mut handle = state.server_handle.write().await;
 
-    if handle.is_some() {
-        return Err("Server is already running".to_string());
+    // 이미 실행 중이면 먼저 종료
+    if let Some(mut existing_handle) = handle.take() {
+        if let Some(tx) = existing_handle.shutdown_tx.take() {
+            let _ = tx.send(());
+            // 잠깐 대기
+            drop(handle);
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+            handle = state.server_handle.write().await;
+        }
     }
 
-    let shutdown_tx = if enable_tls {
+    let shutdown_tx = if params.enable_tls {
         // Start TLS server
         let tls_config = state.tls_config.read().await;
         let tls = tls_config.as_ref()
             .ok_or_else(|| "TLS is enabled but no certificate configured".to_string())?;
 
         crate::server::start_tls_server(
-            port,
-            bind_addr.clone(),
+            params.port,
+            params.bind_addr.clone(),
             state.endpoints.clone(),
             tls.cert_path.clone(),
             tls.key_path.clone(),
@@ -95,30 +140,36 @@ pub async fn start_server(
         .map_err(|e| format!("Failed to start TLS server: {}", e))?
     } else {
         // Start regular HTTP server
-        crate::server::start_server(port, bind_addr.clone(), state.endpoints.clone())
+        crate::server::start_server(params.port, params.bind_addr.clone(), state.endpoints.clone())
             .await
             .map_err(|e| format!("Failed to start server: {}", e))?
     };
 
-    let mut server_handle = crate::server::ServerHandle::new(port, enable_tls);
+    let mut server_handle = crate::server::ServerHandle::new(params.port, params.enable_tls);
     server_handle.shutdown_tx = Some(shutdown_tx);
     *handle = Some(server_handle);
 
-    let protocol = if enable_tls { "https" } else { "http" };
-    let display_addr = &bind_addr;
-    Ok(format!("Server started on {}://{}:{}", protocol, display_addr, port))
+    let protocol = if params.enable_tls { "https" } else { "http" };
+    let display_addr = &params.bind_addr;
+    Ok(format!("Server started on {}://{}:{}", protocol, display_addr, params.port))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTlsConfigParams {
+    cert_path: String,
+    key_path: String,
 }
 
 #[tauri::command]
 pub async fn set_tls_config(
     state: tauri::State<'_, AppState>,
-    cert_path: String,
-    key_path: String,
+    params: SetTlsConfigParams,
 ) -> Result<String, String> {
     let mut tls_config = state.tls_config.write().await;
     *tls_config = Some(TlsConfig {
-        cert_path,
-        key_path,
+        cert_path: params.cert_path,
+        key_path: params.key_path,
     });
     Ok("TLS configuration saved".to_string())
 }
@@ -257,5 +308,63 @@ pub async fn cleanup_temp_certificates(state: tauri::State<'_, AppState>) -> Res
         let _ = std::fs::remove_file(&key_path);
     }
 
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveProjectParams {
+    data: String,
+    filename: String,
+}
+
+#[tauri::command]
+pub async fn save_project(app: tauri::AppHandle, params: SaveProjectParams) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .set_file_name(&params.filename)
+        .save_file(move |file_path| {
+            let result = match file_path {
+                Some(path) => {
+                    match path.into_path() {
+                        Ok(path_buf) => fs::write(path_buf, &params.data).map_err(|e| e.to_string()),
+                        Err(e) => Err(format!("Invalid file path: {}", e)),
+                    }
+                },
+                None => Ok(()),
+            };
+            let _ = tx.send(result);
+        });
+    rx.await.unwrap_or(Ok(()))
+}
+
+#[tauri::command]
+pub async fn load_project(app: tauri::AppHandle) -> Result<String, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+    .file()
+    .add_filter("JSON", &["json"])
+    .pick_file(move |file_path| {
+        let result = match file_path {
+            Some(path) => {
+                match path.into_path() {
+                    Ok(path_buf) => fs::read_to_string(path_buf).map_err(|e| e.to_string()),
+                    Err(e) => Err(format!("Invalid file path: {}", e)),
+                }
+            },
+            None => Ok(String::new()),
+        };
+        let _ = tx.send(result);
+    });
+    rx.await.unwrap_or(Ok(String::new()))
+}
+
+#[tauri::command]
+pub async fn set_project_state(state: tauri::State<'_, AppState>, project_data: ProjectData) -> Result<(), String> {
+    *state.endpoints.write().await = project_data.endpoints;
+    *state.tls_config.write().await = project_data.tls_config;
+    *state.server_settings.write().await = project_data.settings;
     Ok(())
 }
