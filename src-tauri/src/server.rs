@@ -6,11 +6,10 @@ use axum::{
     extract::State,
 };
 use std::sync::Arc;
-use std::path::Path;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
-use crate::endpoints::{AppState, Endpoint};
+use crate::endpoints::Endpoint;
 
 pub struct ServerHandle {
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -35,6 +34,7 @@ pub struct ServerState {
 
 pub async fn start_server(
     port: u16,
+    bind_addr: String,
     app_state: Arc<RwLock<Vec<Endpoint>>>,
 ) -> Result<tokio::sync::oneshot::Sender<()>, String> {
     let server_state = ServerState {
@@ -46,7 +46,7 @@ pub async fn start_server(
         .layer(CorsLayer::permissive())
         .with_state(server_state);
 
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("{}:{}", bind_addr, port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
@@ -67,6 +67,7 @@ pub async fn start_server(
 
 pub async fn start_tls_server(
     port: u16,
+    bind_addr: String,
     app_state: Arc<RwLock<Vec<Endpoint>>>,
     cert_path: String,
     key_path: String,
@@ -80,10 +81,11 @@ pub async fn start_tls_server(
         .layer(CorsLayer::permissive())
         .with_state(server_state);
 
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("{}:{}", bind_addr, port);
 
-    // Load TLS certificates
-    let config = load_tls_config(&cert_path, &key_path).await
+    // Load TLS certificates using axum-server's RustlsConfig
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+        .await
         .map_err(|e| format!("Failed to load TLS config: {}", e))?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -105,42 +107,6 @@ pub async fn start_tls_server(
     });
 
     Ok(shutdown_tx)
-}
-
-async fn load_tls_config(
-    cert_path: &str,
-    key_path: &str,
-) -> Result<tokio_rustls::rustls::ServerConfig, String> {
-    use tokio_rustls::rustls;
-    use std::io::BufReader;
-
-    // Read certificate file
-    let cert_file = std::fs::File::open(cert_path)
-        .map_err(|e| format!("Failed to open cert file '{}': {}", cert_path, e))?;
-    let mut cert_reader = BufReader::new(cert_file);
-
-    // Read key file
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| format!("Failed to open key file '{}': {}", key_path, e))?;
-    let mut key_reader = BufReader::new(key_file);
-
-    // Parse certificates
-    let certs = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to parse certificates: {}", e))?;
-
-    // Parse private key
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| format!("Failed to parse private key: {}", e))?
-        .ok_or_else(|| "No private key found in key file".to_string())?;
-
-    // Build TLS config
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| format!("Failed to build TLS config: {}", e))?;
-
-    Ok(config)
 }
 
 async fn dynamic_handler(

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-opener";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./Sidebar.css";
 
 interface ServerStatus {
@@ -14,6 +14,11 @@ interface TlsConfig {
   key_path: string;
 }
 
+interface NetworkInterface {
+  name: string;
+  ip: string;
+}
+
 export function Sidebar() {
   const [port, setPort] = useState<number>(3000);
   const [serverStatus, setServerStatus] = useState<ServerStatus>({ running: false });
@@ -22,10 +27,13 @@ export function Sidebar() {
   const [certPath, setCertPath] = useState<string>("");
   const [keyPath, setKeyPath] = useState<string>("");
   const [tlsConfigured, setTlsConfigured] = useState<boolean>(false);
+  const [networkInterfaces, setNetworkInterfaces] = useState<NetworkInterface[]>([]);
+  const [selectedInterface, setSelectedInterface] = useState<string>("127.0.0.1");
 
   useEffect(() => {
     checkServerStatus();
     loadTlsConfig();
+    loadNetworkInterfaces();
   }, []);
 
   async function checkServerStatus() {
@@ -53,6 +61,49 @@ export function Sidebar() {
     }
   }
 
+  async function loadNetworkInterfaces() {
+    try {
+      const interfaces = await invoke<NetworkInterface[]>("get_network_interfaces");
+      setNetworkInterfaces(interfaces);
+    } catch (error) {
+      console.error("Failed to load network interfaces:", error);
+    }
+  }
+
+  async function handleBrowseCertFile() {
+    try {
+      const selected = await openDialog({
+        title: "Select Certificate File",
+        filters: [{
+          name: "Certificate Files",
+          extensions: ["pem", "crt", "cer"]
+        }]
+      });
+      if (selected) {
+        setCertPath(selected);
+      }
+    } catch (error) {
+      console.error("Failed to open file dialog:", error);
+    }
+  }
+
+  async function handleBrowseKeyFile() {
+    try {
+      const selected = await openDialog({
+        title: "Select Private Key File",
+        filters: [{
+          name: "Key Files",
+          extensions: ["key", "pem"]
+        }]
+      });
+      if (selected) {
+        setKeyPath(selected);
+      }
+    } catch (error) {
+      console.error("Failed to open file dialog:", error);
+    }
+  }
+
   async function handleSaveTlsConfig() {
     try {
       await invoke("set_tls_config", { certPath, keyPath });
@@ -68,6 +119,7 @@ export function Sidebar() {
   async function handleClearTlsConfig() {
     try {
       await invoke("clear_tls_config");
+      await invoke("cleanup_temp_certificates");
       setCertPath("");
       setKeyPath("");
       setTlsConfigured(false);
@@ -78,9 +130,27 @@ export function Sidebar() {
     }
   }
 
+  async function handleGenerateTempCert() {
+    try {
+      const config = await invoke<TlsConfig>("generate_temp_certificate");
+      setCertPath(config.cert_path);
+      setKeyPath(config.key_path);
+      setTlsConfigured(true);
+      setShowTlsConfig(false);
+      alert("Temporary certificate generated successfully!");
+    } catch (error) {
+      console.error("Failed to generate temp certificate:", error);
+      alert(`Failed to generate certificate: ${error}`);
+    }
+  }
+
   async function handleStartServer() {
     try {
-      const message = await invoke<string>("start_server", { port, enableTls });
+      const message = await invoke<string>("start_server", {
+        port,
+        bindAddr: selectedInterface,
+        enableTls
+      });
       await checkServerStatus();
       alert(message);
     } catch (error) {
@@ -104,7 +174,7 @@ export function Sidebar() {
   return (
     <div className="sidebar">
       <div className="sidebar-header">
-        <h2>Mock API Server</h2>
+        <h2>AKA</h2>
       </div>
 
       <div className="sidebar-section">
@@ -117,11 +187,26 @@ export function Sidebar() {
 
         {serverStatus.running && (
           <div className="server-info">
-            <p>Port: <strong>{serverStatus.port}</strong></p>
-            <p className="url">{protocol}://localhost:{serverStatus.port}</p>
-            {serverStatus.is_tls && <p className="tls-badge">🔒 TLS Enabled</p>}
+            <p className="url">
+              {protocol}://{selectedInterface}:{serverStatus.port}
+            </p>
           </div>
         )}
+
+        <div className="port-input">
+          <label>Bind Address:</label>
+          <select
+            value={selectedInterface}
+            onChange={(e) => setSelectedInterface(e.target.value)}
+            disabled={serverStatus.running}
+          >
+            {networkInterfaces.map((iface) => (
+              <option key={iface.ip} value={iface.ip}>
+                {iface.name}
+              </option>
+            ))}
+          </select>
+        </div>
 
         <div className="port-input">
           <label>Port:</label>
@@ -140,7 +225,13 @@ export function Sidebar() {
             <input
               type="checkbox"
               checked={enableTls}
-              onChange={(e) => setEnableTls(e.target.checked)}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setEnableTls(checked);
+                if (!checked) {
+                  setShowTlsConfig(false);
+                }
+              }}
               disabled={serverStatus.running}
             />
             <span>Enable TLS/HTTPS</span>
@@ -154,10 +245,10 @@ export function Sidebar() {
                 <p className="config-status">✓ TLS certificates configured</p>
                 <button
                   className="btn-secondary"
-                  onClick={() => setShowTlsConfig(true)}
+                  onClick={() => setShowTlsConfig(!showTlsConfig)}
                   disabled={serverStatus.running}
                 >
-                  Edit Config
+                  {showTlsConfig ? "Hide Config" : "Edit Config"}
                 </button>
                 <button
                   className="btn-secondary btn-danger-outline"
@@ -168,12 +259,20 @@ export function Sidebar() {
                 </button>
               </div>
             ) : (
-              <button
-                className="btn-secondary"
-                onClick={() => setShowTlsConfig(true)}
-              >
-                Configure TLS
-              </button>
+              <div className="tls-buttons">
+                <button
+                  className="btn-secondary"
+                  onClick={() => setShowTlsConfig(!showTlsConfig)}
+                >
+                  {showTlsConfig ? "Hide Config" : "Configure TLS"}
+                </button>
+                <button
+                  className="btn-secondary btn-temp-cert"
+                  onClick={handleGenerateTempCert}
+                >
+                  Use Temp Certificate
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -183,21 +282,39 @@ export function Sidebar() {
             <h4>TLS Configuration</h4>
             <div className="form-group">
               <label>Certificate File (.pem/.crt):</label>
-              <input
-                type="text"
-                placeholder="C:\certs\cert.pem"
-                value={certPath}
-                onChange={(e) => setCertPath(e.target.value)}
-              />
+              <div className="file-input-group">
+                <input
+                  type="text"
+                  placeholder="C:\certs\cert.pem"
+                  value={certPath}
+                  onChange={(e) => setCertPath(e.target.value)}
+                />
+                <button
+                  className="btn-browse"
+                  onClick={handleBrowseCertFile}
+                  type="button"
+                >
+                  Browse...
+                </button>
+              </div>
             </div>
             <div className="form-group">
               <label>Private Key File (.key):</label>
-              <input
-                type="text"
-                placeholder="C:\certs\key.pem"
-                value={keyPath}
-                onChange={(e) => setKeyPath(e.target.value)}
-              />
+              <div className="file-input-group">
+                <input
+                  type="text"
+                  placeholder="C:\certs\key.pem"
+                  value={keyPath}
+                  onChange={(e) => setKeyPath(e.target.value)}
+                />
+                <button
+                  className="btn-browse"
+                  onClick={handleBrowseKeyFile}
+                  type="button"
+                >
+                  Browse...
+                </button>
+              </div>
             </div>
             <div className="modal-buttons">
               <button className="btn-primary" onClick={handleSaveTlsConfig}>

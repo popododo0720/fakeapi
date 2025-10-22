@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import "./App.css";
 
@@ -46,10 +47,12 @@ function App() {
   }
 
   return (
-    <div className="app-layout">
-      <Sidebar />
+    <>
+      <TitleBar />
+      <div className="app-layout">
+        <Sidebar />
 
-      <div className="main-content">
+        <div className="main-content">
         <div className="container">
           <h1>Endpoints Management</h1>
 
@@ -129,7 +132,8 @@ function App() {
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 

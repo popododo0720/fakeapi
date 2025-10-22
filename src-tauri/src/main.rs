@@ -3,6 +3,7 @@
 
 mod endpoints;
 mod server;
+use tauri::Manager;
 
 use endpoints::{
     AppState,
@@ -14,11 +15,15 @@ use endpoints::{
     get_server_status,
     set_tls_config,
     get_tls_config,
-    clear_tls_config
+    clear_tls_config,
+    get_network_interfaces,
+    generate_temp_certificate,
+    cleanup_temp_certificates
 };
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             add_endpoint,
@@ -29,8 +34,20 @@ fn main() {
             get_server_status,
             set_tls_config,
             get_tls_config,
-            clear_tls_config
+            clear_tls_config,
+            get_network_interfaces,
+            generate_temp_certificate,
+            cleanup_temp_certificates
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let app_handle = window.app_handle();
+                let state = app_handle.state::<AppState>();
+                tauri::async_runtime::block_on(async {
+                    let _ = cleanup_temp_certificates(state).await;
+                });
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

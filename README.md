@@ -1,16 +1,21 @@
-# Tauri + React + Typescript
-
-This template should help get you started developing with Tauri, React and Typescript in Vite.
-
-## Recommended IDE Setup
-
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
 
 '''
 npm install
 '''
 
+#개발모드
 '''
 npm run tauri dev
 
 '''
+
+#빌드
+'''
+npm run tauri build
+'''
+
+
+##need to
+Response Delay & Status Code - 실제 환경 테스트에 필수
+Request Logging - 디버깅에 매우 유용
+프로젝트 저장/불러오기 - 작업 환경 공유

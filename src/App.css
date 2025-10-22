@@ -13,7 +13,7 @@ body {
 
 .app-layout {
   display: flex;
-  height: 100vh;
+  height: calc(100vh - 36px);
   overflow: hidden;
 }
 
