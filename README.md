@@ -42,7 +42,7 @@ npm run tauri build
 |------|------|
 | 프레임워크 | Tauri, React  |
 | 빌드 도구 | npm |
-| 언어 | TypeScript / Rust |
+| 언어 | TypeScript, Rust |
 
 ---
 
